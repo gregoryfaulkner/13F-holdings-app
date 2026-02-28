@@ -6,6 +6,8 @@ A Flask web app for fetching, analyzing, and visualizing SEC 13F/N-PORT filing d
 ![Flask](https://img.shields.io/badge/Flask-3.x-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
+![Dashboard](static/screenshot-dashboard.png)
+
 ## Features
 
 - **Unified Manager Search** — Search 13F filers and mutual funds (N-PORT) from a single bar, with typeahead powered by SEC EDGAR and EFTS

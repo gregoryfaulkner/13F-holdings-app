@@ -8,6 +8,7 @@ __pycache__/
 *.zip
 *.pptx
 *.png
+!static/screenshot*.png
 *.db
 *.db-shm
 *.db-wal
