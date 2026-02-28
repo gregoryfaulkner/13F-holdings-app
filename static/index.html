@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Investment Manager Holdings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<!-- Header -->
+<div style="background:rgba(12,18,32,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border-subtle);z-index:var(--z-sticky)" class="px-5 md:px-8 py-4 sticky top-0">
+  <div class="flex items-center justify-between mobile-header">
+    <div>
+      <h1 style="font-size:var(--text-xl);font-weight:var(--weight-bold);color:#fff;letter-spacing:var(--tracking-tight);line-height:1.35">Investment Manager Holdings</h1>
+      <p style="font-size:var(--text-xs);color:var(--muted);margin-top:2px;letter-spacing:var(--tracking-wide);text-transform:uppercase;font-weight:var(--weight-medium)">SEC 13F Filing Intelligence</p>
+    </div>
+    <div class="flex items-center gap-3 mobile-header-btns">
+      <span id="sBadge" class="text-sm text-slate-400">Ready</span>
+      <button id="resetBtn" class="btn btn-gray hidden" onclick="doReset()">&#8634; Reset</button>
+      <button id="pdfBtn" class="btn btn-gray hidden" onclick="dlPdf()">&#128196; PDF Report</button>
+      <button id="dlBtn" class="btn btn-gray hidden" onclick="dlAll()">&#128230; Download All</button>
+      <button id="stopBtn" class="btn hidden" style="background:#ef4444;color:#fff" onclick="doStop()">&#9632; Stop</button>
+      <button id="runBtn" class="btn btn-blue" onclick="doRun()">&#9654; Fetch Holdings</button>
+    </div>
+  </div>
+  <!-- Progress bar (inline in header) -->
+  <div id="progressRow" class="mt-2" style="display:none">
+    <div class="flex items-center gap-3">
+      <div class="pbar" style="flex:1"><div id="pFill" class="pfill" style="width:0%"></div></div>
+      <span id="pText" class="text-xs text-slate-400 whitespace-nowrap"></span>
+    </div>
+    <div id="mgrStatus" class="mgr-status mt-1"></div>
+    <details class="mt-1">
+      <summary class="text-xs text-slate-500 cursor-pointer">Log</summary>
+      <div id="logBox" class="log" style="max-height:120px">Waiting to start...</div>
+    </details>
+  </div>
+</div>
+<!-- Main -->
+<div class="flex mobile-stack" style="height:calc(100vh - 73px)">
+  <!-- Left -->
+  <div class="flex-1 overflow-y-auto p-5 md:p-8">
+    <!-- Add Manager (unified search) — placed first so dropdown opens downward -->
+    <div class="card p-5 mb-5" style="position:relative;z-index:var(--z-dropdown)">
+      <h3 class="text-sm font-semibold text-slate-300 mb-3">Add Manager / Fund</h3>
+      <div class="flex gap-3 items-start mobile-add-row">
+        <div class="ta-wrap" style="flex:1" id="taWrap">
+          <input id="aName" class="inp" placeholder="Search 13F managers and mutual funds..." autocomplete="off"
+                 oninput="taInput()" onkeydown="taKey(event)" onfocus="taInput()">
+          <div id="taDd" class="ta-dd"></div>
+        </div>
+        <input id="aCik" class="inp" style="width:140px" placeholder="CIK (auto-filled)">
+        <button id="addMgrBtn" class="btn-green" onclick="addMgr()" style="white-space:nowrap;padding:8px 16px">+ Add</button>
+      </div>
+      <div id="nportSeriesRow" class="nport-series-row hidden">
+        <span class="text-xs text-slate-400">Fund Series:</span>
+        <select id="nSeries" class="inp" style="flex:1;padding:4px 8px;font-size:13px"><option value="">— Select series —</option></select>
+        <input id="nSeriesManual" class="inp" style="max-width:180px;width:100%;padding:4px 8px;font-size:12px" placeholder="Or type keyword...">
+        <button class="btn btn-sm btn-blue" onclick="addNportFromUnified()">Add Fund</button>
+        <button class="btn btn-sm btn-gray" onclick="cancelNport()">Cancel</button>
+      </div>
+    </div>
+    <!-- Managers -->
+    <div class="card p-5 mb-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-white">Managers</h2>
+        <div class="flex items-center gap-3 mobile-ctrl-wrap">
+          <select id="presetSel" class="inp" style="min-width:140px;max-width:180px;padding:5px 8px;font-size:13px" onchange="loadPreset()">
+            <option value="">— Presets —</option>
+          </select>
+          <button class="btn btn-sm btn-gray" onclick="savePreset()">Save Preset</button>
+          <button class="btn btn-sm btn-red" onclick="clearMgrs()">Clear All</button>
+          <span id="mCnt" class="text-sm text-slate-400"></span>
+        </div>
+      </div>
+      <div id="mGrid" class="mgr-grid"></div>
+      <div id="wtBarArea" class="hidden" style="margin-top:12px">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs text-slate-400">Portfolio Weight Allocation</span>
+          <span id="wtLabel" class="text-xs font-semibold text-slate-300"></span>
+        </div>
+        <div class="wt-bar-wrap">
+          <div id="wtFill" class="wt-bar-fill" style="width:0%"></div>
+          <div id="wtBarText" class="wt-bar-label"></div>
+        </div>
+      </div>
+    </div>
+    <!-- Results area -->
+    <div id="resArea" class="hidden">
+      <!-- Results summary -->
+      <div class="card p-5 mb-5">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold text-white">Results</h2>
+          <div id="resSummary"></div>
+        </div>
+        <div id="csvLinks" class="flex flex-wrap gap-2"></div>
+      </div>
+      <!-- Portfolio Story Hero -->
+      <div id="heroInsight" class="hidden" style="margin-bottom:var(--sp-7)">
+        <div style="background:linear-gradient(135deg,rgba(91,141,239,.08) 0%,rgba(139,108,246,.06) 100%);border:1px solid rgba(91,141,239,.15);border-radius:var(--radius-xl);padding:48px 40px;position:relative;overflow:hidden">
+          <div style="position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent-gradient)"></div>
+          <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);text-transform:uppercase;letter-spacing:var(--tracking-wide);color:var(--accent);margin-bottom:var(--sp-4)">Portfolio Intelligence</div>
+          <div id="heroHeadline" style="font-size:31px;font-weight:var(--weight-bold);color:#fff;letter-spacing:var(--tracking-tight);line-height:1.2;margin-bottom:var(--sp-4);max-width:680px"></div>
+          <div id="heroSubtext" style="font-size:var(--text-lg);color:var(--text-secondary);line-height:1.45;max-width:600px;margin-bottom:var(--sp-6)"></div>
+          <div id="heroMetrics" style="display:flex;gap:var(--sp-7);flex-wrap:wrap"></div>
+        </div>
+      </div>
+      <!-- Summary dashboard -->
+      <div id="summaryArea" class="card p-5 mb-5 hidden">
+        <h2 class="text-lg font-semibold text-white mb-4">Summary Dashboard</h2>
+        <div id="statGrid" class="stat-grid mb-4 scroll-reveal"></div>
+        <div id="summaryFindings" class="summary-findings hidden scroll-reveal"></div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mobile-chart-grid-1 scroll-reveal">
+          <div class="sr-child scroll-reveal">
+            <div id="sectorCompBarInsight" class="chart-insight hidden"></div>
+            <div id="sectorCompBar" class="mobile-chart-sm" style="height:420px"></div>
+            <div id="sectorCompBarDetail" class="chart-detail-card hidden"></div>
+          </div>
+          <div class="sr-child scroll-reveal" style="transition-delay:0.2s">
+            <div id="geoCompBarInsight" class="chart-insight hidden"></div>
+            <div id="geoCompBar" class="mobile-chart-sm" style="height:420px"></div>
+            <div id="geoCompBarDetail" class="chart-detail-card hidden"></div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mobile-chart-grid-1 scroll-reveal" style="margin-top:var(--sp-4)">
+          <div class="sr-child scroll-reveal">
+            <div id="topHoldingsInsight" class="chart-insight hidden"></div>
+            <div id="topHoldingsCompBar" class="mobile-chart-sm" style="height:420px"></div>
+          </div>
+          <div class="sr-child scroll-reveal" style="transition-delay:0.2s">
+            <div id="industryBarInsight" class="chart-insight hidden"></div>
+            <div id="industryBar" class="mobile-chart-sm" style="height:380px"></div>
+            <div id="industryBarDetail" class="chart-detail-card hidden"></div>
+          </div>
+        </div>
+        <div class="scroll-reveal sr-scale" style="margin-top:var(--sp-4)">
+          <div id="valuationInsight" class="chart-insight hidden"></div>
+          <div id="valuationBubble" class="mobile-chart-lg" style="height:500px"></div>
+        </div>
+        <div id="acwiSource" class="hidden" style="text-align:right;margin-top:6px">
+          <span style="font-size:11px;color:#64748b;font-style:italic">Benchmark: MSCI ACWI via <span id="acwiSourceLabel"></span></span>
+        </div>
+      </div>
+      <!-- Tabs: Treemap / Overlap / Sectors / QoQ Diff -->
+      <div class="card p-5 mb-5">
+        <div class="tab-bar">
+          <div class="tab active" onclick="switchTab('treemap')">Treemap</div>
+          <div class="tab" onclick="switchTab('heatmap')">Heatmap</div>
+          <div class="tab" onclick="switchTab('overlap')">Overlap</div>
+          <div class="tab" onclick="switchTab('sectors')">Sectors</div>
+          <div class="tab" onclick="switchTab('geo')">Geography</div>
+          <div class="tab" onclick="switchTab('diff')">QoQ Diff</div>
+        </div>
+        <div id="tab-treemap" class="tab-content active">
+          <div id="tmTitle" style="text-align:center;margin-bottom:12px"></div>
+          <div id="tmBox" class="mobile-chart-lg" style="height:600px"></div>
+        </div>
+        <div id="tab-heatmap" class="tab-content">
+          <div class="hm-legend">
+            <span class="hm-legend-label">-30%</span>
+            <div class="hm-legend-bar"></div>
+            <span class="hm-legend-label">+30%</span>
+            <span class="hm-legend-label" style="margin-left:8px">(Filing Quarter Return)</span>
+          </div>
+          <div id="heatmapBox" style="min-height:200px"></div>
+        </div>
+        <div id="tab-overlap" class="tab-content">
+          <div id="overlapBubbleMatrix" class="scroll-reveal sr-scale" style="height:500px;margin-bottom:var(--sp-4)"></div>
+          <div id="overlapBox" class="mobile-table-wrap scroll-reveal"></div>
+        </div>
+        <div id="tab-sectors" class="tab-content">
+          <div class="flex gap-2 mb-3">
+            <button class="btn btn-sm btn-blue" id="sectorTmBtn" onclick="loadSectorTreemap('sector')">Sector Treemap</button>
+            <button class="btn btn-sm btn-gray" id="industryTmBtn" onclick="loadSectorTreemap('industry')">Industry Treemap</button>
+          </div>
+          <div id="sectorTreemapBox" class="mobile-chart-lg scroll-reveal sr-scale" style="height:600px"></div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 mobile-chart-grid-1 scroll-reveal" style="width:100%">
+            <div id="sectorSunburst" class="mobile-chart-sm sr-child scroll-reveal" style="height:450px;width:100%"></div>
+            <div id="sectorByMgr" class="mobile-chart-sm sr-child scroll-reveal" style="transition-delay:0.2s;height:450px;width:100%"></div>
+          </div>
+        </div>
+        <div id="tab-geo" class="tab-content">
+          <div id="geoTreemapBox" class="mobile-chart-lg scroll-reveal sr-scale" style="height:600px"></div>
+        </div>
+        <div id="tab-diff" class="tab-content">
+          <div class="flex gap-3 mb-4 items-end mobile-diff-row">
+            <div><label id="diffLabel1" class="text-xs text-slate-400">Period 1 (earlier)</label>
+              <input id="diffDate1" type="date" class="inp" value="2025-09-30"></div>
+            <div><label id="diffLabel2" class="text-xs text-slate-400">Period 2 (later / Filing Date)</label>
+              <input id="diffDate2" type="date" class="inp" value="2025-12-31"></div>
+            <button class="btn btn-blue" onclick="runDiff()">Compare</button>
+          </div>
+          <div id="diffBox"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- Right sidebar -->
+  <div class="w-full md:w-96 border-l border-slate-700 overflow-y-auto p-4 md:p-6 flex flex-col gap-5 mobile-sidebar">
+    <div class="card p-5">
+      <h2 class="text-sm font-semibold text-slate-300 mb-3">Report</h2>
+      <div class="space-y-3">
+        <div><label class="text-xs text-slate-400">Client Name</label>
+          <input id="sClient" class="inp" placeholder="e.g. Acme Corp"></div>
+        <div><label class="text-xs text-slate-400">Report Name</label>
+          <input id="sReport" class="inp" placeholder="e.g. Q4 2025 Holdings"></div>
+      </div>
+    </div>
+    <div class="card p-5">
+      <h2 class="text-sm font-semibold text-slate-300 mb-3">Settings</h2>
+      <div class="space-y-3">
+        <div><label class="text-xs text-slate-400">Top N Holdings</label>
+          <input id="sTopN" type="number" class="inp" min="1" max="100" value="20"></div>
+        <div><label class="text-xs text-slate-400">Reporting Quarter</label>
+          <select id="sDate" class="inp"></select></div>
+        <div><label class="text-xs text-slate-400">SEC Identity</label>
+          <input id="sIdent" class="inp"></div>
+        <div class="flex items-center gap-2 mt-1">
+          <input id="sEnrich" type="checkbox" checked>
+          <label for="sEnrich" class="text-sm text-slate-300">Enrich with financial data (yfinance)</label>
+        </div>
+        <button class="btn btn-blue w-full mt-2" onclick="saveCfg()">Save Settings</button>
+      </div>
+    </div>
+    <div class="card p-5">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-sm font-semibold text-slate-300">History</h2>
+        <button class="btn btn-sm btn-gray" onclick="loadHistory()" title="Refresh">&#8635;</button>
+      </div>
+      <div id="historyList" class="space-y-1" style="max-height:240px;overflow-y:auto">
+        <div class="text-xs text-slate-500">Loading...</div>
+      </div>
+      <div id="histCompare" class="hidden mt-3 pt-3 border-t border-slate-700">
+        <div class="text-xs text-slate-400 mb-2">Instant Compare (no re-fetch)</div>
+        <div class="flex gap-2 items-center">
+          <select id="histRun1" class="inp" style="flex:1;padding:3px 6px;font-size:11px"></select>
+          <span class="text-xs text-slate-500">vs</span>
+          <select id="histRun2" class="inp" style="flex:1;padding:3px 6px;font-size:11px"></select>
+        </div>
+        <button class="btn btn-sm btn-blue w-full mt-2" onclick="histCompare()">Compare</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/static/js/app.js"></script>
+<!-- Spotlight overlay -->
+<div id="spotlight" style="display:none">
+  <div class="spot-backdrop" onclick="closeSpotlight()"></div>
+  <div class="spot-modal">
+    <input id="spotInput" class="spot-input" placeholder="Search stocks across all managers..." oninput="spotSearch(this.value)" autocomplete="off">
+    <div id="spotResults" class="spot-results"></div>
+  </div>
+</div>
+<!-- Keyboard hint -->
+<div class="spot-hint" onclick="openSpotlight()" style="cursor:pointer"><kbd>Ctrl</kbd><kbd>K</kbd> <span>Search stocks</span></div>
+<!-- Stock Drill-Down Panel -->
+<div id="sdpOverlay" class="sdp-overlay" onclick="closeStockPanel()"></div>
+<div id="sdpPanel" class="sdp-panel">
+  <div class="sdp-header">
+    <button class="sdp-back" onclick="closeStockPanel()" title="Close">&#10005;</button>
+    <div class="sdp-breadcrumb">
+      <span class="sdp-breadcrumb-link" onclick="closeStockPanel()">Holdings</span>
+      <span class="sdp-breadcrumb-sep">&#8250;</span>
+      <span id="sdpBreadcrumbTicker" class="sdp-breadcrumb-current"></span>
+    </div>
+  </div>
+  <div class="sdp-body" id="sdpBody"></div>
+</div>
+</body></html>

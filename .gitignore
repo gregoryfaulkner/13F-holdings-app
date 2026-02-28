@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Generated data files
+*.xlsx
+*.csv
+*.zip
+*.pptx
+*.png
+*.db
+*.db-shm
+*.db-wal
+
+# Config with potential secrets
+holdings_config.json
+bentley_config.json
+
+# Misc
+_ul
+*.txt
+.claude/
