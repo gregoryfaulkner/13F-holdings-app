@@ -27,13 +27,15 @@ Flask web app for fetching, analyzing, and visualizing SEC 13F filing data from 
 | File | Purpose |
 |------|---------|
 | `index.html` | HTML skeleton with CDN links (Tailwind, Plotly, Google Fonts) |
-| `css/app.css` | ~40-token design system, glassmorphism, animations, responsive breakpoints |
+| `css/app.css` | ~35-token design system, glassmorphism, animations, responsive breakpoints |
 | `js/app.js` | All JS: chart rendering, typeahead (stale-while-revalidate), SSE, state management |
 
 ### Shared JS helpers
 - `qrColor(qr, fallback)` — quarterly-return HSL color
 - `plotTreemap(elId, data, opts)` — shared Plotly treemap config + click→stock panel
 - `plotCompBar(elId, cfg)` — grouped horizontal bar (Portfolio vs ACWI)
+- `renderCompBar(key, data, acwi)` — config-driven wrapper (`COMP_BAR_CONFIGS`) for sector/geo/holdings comparison bars
+- `_buildInsight(id, data, guard, buildFn)` — factory for all 5 insight generators
 - `populateQuarterSelect()` — reporting quarter dropdown options
 
 ## Architecture
@@ -99,7 +101,7 @@ returns (filing quarter, prior quarter, QTD), forward P/E, trailing EPS, forward
 
 - **Philosophy:** Joe Gebbia-inspired — story-driven UX, generous whitespace, craft in transitions
 - **Palette:** Warmer dark (`#0c1220` base), accent `#5b8def`, glassmorphism (`backdrop-filter:blur`)
-- **Tokens:** ~40 CSS custom properties in `:root` (spacing, colors, typography, radius, shadows, easing)
+- **Tokens:** ~35 CSS custom properties in `:root` (spacing, colors, typography, radius, shadows, easing)
 - **Animations:** `fadeInUp`, `fadeInScale`, `slideInRight`, spring easing, stagger delays, skeleton shimmer
 - **Charts:** Dark theme (`#0c1220` bg), blue (`#5b8def`) portfolio vs amber (`#F59E0B`) ACWI
 
