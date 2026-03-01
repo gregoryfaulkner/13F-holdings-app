@@ -936,6 +936,13 @@ def _empty_result():
         # QTD (quarter-to-date since filing quarter end)
         "qtd_return_pct": None,
         "qtd_price_start": None,
+        # Monthly returns within current quarter
+        "monthly_returns": None,  # [{month: "Jan", return_pct: 3.2}, ...]
+        # Current price (most recent close)
+        "current_price": None,
+        # Revenue / Sales
+        "forward_revenue_growth": None,
+        "forward_ps": None,
         # Static
         "sector": None,
         "industry": None,
@@ -1011,16 +1018,11 @@ def fetch_ticker_data(ticker, quarter_end):
                 result["industry"] = result["industry"] or fb_i
                 result["country"] = result["country"] or fb_c
 
-        # Dividend yield — yfinance returns as a decimal (e.g. 0.0314 for 3.14%)
-        # Convert to percentage for display (multiply by 100).
+        # Dividend yield — yfinance `dividendYield` is already in percentage form
+        # (e.g. 0.39 means 0.39%, 3.01 means 3.01%). Do NOT multiply by 100.
         raw_dy = _safe_float(info.get("dividendYield"))
         if raw_dy is not None:
-            # Sanity: raw decimal should be < 1.0 for normal stocks;
-            # if > 1.0, yfinance may have already given percentage — don't double-convert
-            if raw_dy > 1.0:
-                result["dividend_yield"] = round(raw_dy, 2)
-            else:
-                result["dividend_yield"] = round(raw_dy * 100, 2)
+            result["dividend_yield"] = round(raw_dy, 2)
 
         # Trailing EPS (trailing 4 quarters) and Forward EPS (forward 12 months)
         fwd_eps = _safe_float(info.get("forwardEps"))
@@ -1030,13 +1032,51 @@ def fetch_ticker_data(ticker, quarter_end):
         if fwd_eps is not None:
             result["forward_eps"] = round(fwd_eps, 2)
 
-        # Forward EPS growth
-        fwd_growth = _safe_float(info.get("earningsGrowth"))
-        if fwd_growth is not None:
-            result["forward_eps_growth"] = round(fwd_growth * 100, 2)  # convert to %
-        elif fwd_eps is not None and trail_eps is not None and abs(trail_eps) > 0.001:
-            # Fallback: compute from forward/trailing EPS
-            result["forward_eps_growth"] = round((fwd_eps - trail_eps) / abs(trail_eps) * 100, 2)
+        # Forward EPS growth — prefer analyst consensus next-year growth estimate
+        _eps_growth_set = False
+        try:
+            ge = t.growth_estimates
+            if ge is not None and not ge.empty and "+1y" in ge.index:
+                next_yr = ge.loc["+1y", "stockTrend"]
+                if next_yr is not None and not (isinstance(next_yr, float) and next_yr != next_yr):
+                    result["forward_eps_growth"] = round(float(next_yr) * 100, 2)
+                    _eps_growth_set = True
+        except Exception:
+            pass
+        if not _eps_growth_set:
+            fwd_growth = _safe_float(info.get("earningsGrowth"))
+            if fwd_growth is not None:
+                result["forward_eps_growth"] = round(fwd_growth * 100, 2)
+            elif fwd_eps is not None and trail_eps is not None and abs(trail_eps) > 0.001:
+                result["forward_eps_growth"] = round((fwd_eps - trail_eps) / abs(trail_eps) * 100, 2)
+
+        # ── Forward revenue growth — analyst consensus next-year revenue growth ──
+        _rev_growth_val = None
+        try:
+            re = t.revenue_estimate
+            if re is not None and not re.empty and "+1y" in re.index:
+                rev_gr = re.loc["+1y", "growth"]
+                if rev_gr is not None and not (isinstance(rev_gr, float) and rev_gr != rev_gr):
+                    _rev_growth_val = float(rev_gr)
+                    result["forward_revenue_growth"] = round(_rev_growth_val * 100, 2)
+        except Exception:
+            pass
+        if result["forward_revenue_growth"] is None:
+            rg = _safe_float(info.get("revenueGrowth"))
+            if rg is not None:
+                _rev_growth_val = rg
+                result["forward_revenue_growth"] = round(rg * 100, 2)
+
+        # ── Forward P/S (Price-to-Sales) ────
+        market_cap = _safe_float(info.get("marketCap"))
+        total_revenue = _safe_float(info.get("totalRevenue"))
+        if market_cap and total_revenue and total_revenue > 0:
+            if _rev_growth_val is not None and _rev_growth_val > -1:
+                fwd_revenue = total_revenue * (1 + _rev_growth_val)
+                if fwd_revenue > 0:
+                    result["forward_ps"] = round(market_cap / fwd_revenue, 2)
+            else:
+                result["forward_ps"] = round(market_cap / total_revenue, 2)
 
         # ── Earnings data for EPS beat ────
         earnings = None
@@ -1073,6 +1113,59 @@ def fetch_ticker_data(ticker, quarter_end):
                     if qtd_start_price > 0:
                         result["qtd_return_pct"] = round((qtd_end_price / qtd_start_price - 1) * 100, 2)
                         result["qtd_price_start"] = round(qtd_start_price, 2)
+                    result["current_price"] = round(qtd_end_price, 2)
+
+                    # ── Monthly returns within current quarter ────
+                    # Determine months in the current quarter (quarter after filing quarter)
+                    curr_q_start_month = qtr_end_dt.month + 1
+                    curr_q_start_year = qtr_end_dt.year
+                    if curr_q_start_month > 12:
+                        curr_q_start_month = 1
+                        curr_q_start_year += 1
+                    month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+                    monthly_rets = []
+                    for mi in range(3):  # up to 3 months in a quarter
+                        m = curr_q_start_month + mi
+                        yr = curr_q_start_year
+                        if m > 12:
+                            m -= 12
+                            yr += 1
+                        # Month start and end
+                        m_start_dt = datetime(yr, m, 1)
+                        if m == 12:
+                            m_end_dt = datetime(yr + 1, 1, 1)
+                        else:
+                            m_end_dt = datetime(yr, m + 1, 1)
+                        # Only include months that have started
+                        if m_start_dt > today:
+                            break
+                        is_current_month = (today.year == yr and today.month == m)
+                        label = month_names[m - 1] + (" MTD" if is_current_month else "")
+                        # Filter qtd_hist for this month
+                        try:
+                            m_data = qtd_hist[(qtd_hist.index >= m_start_dt.strftime("%Y-%m-%d")) &
+                                              (qtd_hist.index < m_end_dt.strftime("%Y-%m-%d"))]
+                            if m_data is not None and len(m_data) >= 1:
+                                # Use last close of prior month (or qtd start) as base
+                                prior = qtd_hist[qtd_hist.index < m_start_dt.strftime("%Y-%m-%d")]
+                                if len(prior) > 0:
+                                    base_price = float(prior["Close"].iloc[-1])
+                                else:
+                                    base_price = qtd_start_price
+                                end_price = float(m_data["Close"].iloc[-1])
+                                if base_price > 0:
+                                    monthly_rets.append({
+                                        "month": label,
+                                        "return_pct": round((end_price / base_price - 1) * 100, 2)
+                                    })
+                                else:
+                                    monthly_rets.append({"month": label, "return_pct": None})
+                            else:
+                                monthly_rets.append({"month": label, "return_pct": None})
+                        except Exception:
+                            monthly_rets.append({"month": label, "return_pct": None})
+                    if monthly_rets:
+                        result["monthly_returns"] = monthly_rets
             except Exception:
                 pass
 

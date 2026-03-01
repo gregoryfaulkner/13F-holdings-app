@@ -35,7 +35,6 @@ progress_queues = {}
 run_lock        = threading.Lock()
 abort_flag      = threading.Event()
 last_results    = {}
-diff_results    = {}
 
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
@@ -366,9 +365,16 @@ def run_fetch(cfg, q):
                 row["dividend_yield"] = data.get("dividend_yield")
                 row["trailing_eps"] = data.get("trailing_eps")
                 row["forward_eps"] = data.get("forward_eps")
+                # Revenue / Sales
+                row["forward_revenue_growth"] = data.get("forward_revenue_growth")
+                row["forward_ps"] = data.get("forward_ps")
                 # QTD
                 row["qtd_return_pct"] = data.get("qtd_return_pct")
                 row["qtd_price_start"] = data.get("qtd_price_start")
+                # Monthly returns within current quarter
+                row["monthly_returns"] = data.get("monthly_returns")
+                # Current price
+                row["current_price"] = data.get("current_price")
                 # Static
                 row["sector"] = data.get("sector")
                 row["industry"] = data.get("industry")
@@ -398,46 +404,13 @@ def run_fetch(cfg, q):
 
     # ── Generate output files ──
     if combined:
-        # Write individual XLSX per manager
-        by_mgr = defaultdict(list)
-        for r in combined:
-            by_mgr[r["manager"]].append(r)
-        for mgr_name, mgr_rows in by_mgr.items():
-            try:
-                period = mgr_rows[0]["period_of_report"]
-                fname = holdings.write_individual_xlsx(mgr_name, period, mgr_rows)
-                res["files"].append(fname)
-                # Update manager result with file
-                for m in res["managers"]:
-                    if m["name"] == mgr_name and m["status"] == "success":
-                        m["file"] = fname
-            except Exception as e:
-                log(f"  XLSX error for {mgr_name}: {e}")
-
-        cname = holdings.write_combined_xlsx(combined, run_date)
-        res["files"].append(cname)
-        log(f"Combined Excel: {cname} ({len(combined)} rows)")
-
-        # Write weighted portfolio XLSX
         try:
             weights = cfg.get("manager_weights", {})
-            wname = holdings.write_weighted_xlsx(combined, run_date, weights)
-            res["files"].append(wname)
-            log(f"Weighted Portfolio: {wname}")
+            xlsx_name = holdings.write_simplified_xlsx(combined, run_date, weights)
+            res["files"].append(xlsx_name)
+            log(f"Portfolio Excel: {xlsx_name}")
         except Exception as e:
-            log(f"  Weighted XLSX error: {e}")
-
-        log("Generating report PowerPoint...")
-        try:
-            pptx_name = holdings.write_report_pptx(
-                combined, run_date,
-                client_name=cfg.get("client_name", ""),
-                report_name=cfg.get("report_name", ""))
-            if pptx_name:
-                res["files"].append(pptx_name)
-                log(f"Report PPTX: {pptx_name}")
-        except Exception as e:
-            log(f"  PPTX error: {e}")
+            log(f"  Excel error: {e}")
 
     res["all_rows"] = combined
     aborted = abort_flag.is_set()
@@ -469,7 +442,7 @@ def _search_edgar_by_form(query, form_type="13F-HR"):
         "&owner=include&count=10&search_text=&action=getcompany&output=atom"
     )
     req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": "*/*"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=5) as resp:
         xml_data = resp.read().decode("utf-8", errors="replace")
 
     root = ET.fromstring(xml_data)
@@ -522,6 +495,10 @@ def _search_edgar_13f(query):
                 seen_ciks.add(info["cik"])
                 results.append({"name": info["name"], "cik": info["cik"]})
 
+    # Early return if curated list has plenty of matches
+    if len(results) >= 10:
+        return results[:15]
+
     # 2) EDGAR search with form type 13F-HR
     try:
         for r in _search_edgar_by_form(query, "13F-HR"):
@@ -531,17 +508,7 @@ def _search_edgar_13f(query):
     except Exception:
         pass
 
-    # 3) If few results, broader EDGAR search (all form types)
-    if len(results) < 5:
-        try:
-            for r in _search_edgar_by_form(query, ""):
-                if r["cik"] not in seen_ciks:
-                    seen_ciks.add(r["cik"])
-                    results.append(r)
-        except Exception:
-            pass
-
-    # 4) Direct CIK lookup if query is numeric
+    # 3) Direct CIK lookup if query is numeric
     if query.strip().isdigit() and query.strip() not in seen_ciks:
         try:
             from edgar import Company
@@ -1004,30 +971,6 @@ def api_stop():
 def api_results():
     return jsonify({k: v for k, v in last_results.items() if k != "all_rows"})
 
-@app.route("/api/treemap-data")
-def api_treemap():
-    cfg = load_config()
-    weights = cfg.get("manager_weights", {})
-    by_mgr = defaultdict(list)
-    for r in last_results.get("all_rows", []):
-        tk = r.get("ticker", "N/A")
-        dlabel = f"{r['name']} ({tk})" if tk != "N/A" else r["name"]
-        by_mgr[r["manager"]].append({
-            "name": r["name"], "ticker": tk,
-            "display_label": dlabel,
-            "pct": r["pct_of_portfolio"], "value": r.get("value_usd", 0),
-            "filing_quarter_return": r.get("filing_quarter_return_pct"),
-            "prior_quarter_return": r.get("prior_quarter_return_pct"),
-            "qtd_return": r.get("qtd_return_pct"),
-            "forward_pe": r.get("forward_pe"),
-            "sector": r.get("sector"),
-            "country": r.get("country"),
-        })
-    managers = []
-    for m, s in by_mgr.items():
-        managers.append({"manager": m, "weight": weights.get(m, 0), "stocks": s})
-    return jsonify({"managers": managers})
-
 @app.route("/api/summary-data")
 def api_summary():
     try:
@@ -1039,29 +982,6 @@ def api_summary():
             manager_weights=weights if any(v > 0 for v in weights.values()) else None
         )
         return jsonify(stats)
-    except ImportError:
-        return jsonify({"error": "analysis module not found"}), 500
-
-@app.route("/api/valuation-scatter")
-def api_valuation_scatter():
-    try:
-        import analysis
-        cfg = load_config()
-        weights = cfg.get("manager_weights", {})
-        mw = weights if any(v > 0 for v in weights.values()) else None
-        data = analysis.compute_top_stocks_valuation(
-            last_results.get("all_rows", []), manager_weights=mw
-        )
-        return jsonify(data)
-    except ImportError:
-        return jsonify({"error": "analysis module not found"}), 500
-
-@app.route("/api/overlap-data")
-def api_overlap():
-    try:
-        import analysis
-        overlap = analysis.compute_overlap(last_results.get("all_rows", []))
-        return jsonify({"overlap": overlap})
     except ImportError:
         return jsonify({"error": "analysis module not found"}), 500
 
@@ -1090,86 +1010,59 @@ def api_geo():
     except ImportError:
         return jsonify({"error": "analysis module not found"}), 500
 
-@app.route("/api/category-stocks")
-def api_category_stocks():
-    """Get top stocks in a sector/industry/country for drill-down."""
-    cat_type = request.args.get("type")
-    cat_name = request.args.get("name")
-    if not cat_type or not cat_name:
-        return jsonify({"error": "type and name required"}), 400
-    if cat_type not in ("sector", "industry", "country"):
-        return jsonify({"error": "type must be sector, industry, or country"}), 400
+@app.route("/api/written-analysis")
+def api_written_analysis():
+    if not last_results.get("all_rows"):
+        return jsonify({"error": "No data yet"}), 404
     try:
         import analysis
-        normalize_fn = None
-        if cat_type == "sector":
-            from financial_data import normalize_sector_name
-            normalize_fn = normalize_sector_name
-        elif cat_type == "country":
-            from financial_data import normalize_country_name
-            normalize_fn = normalize_country_name
         cfg = load_config()
         weights = cfg.get("manager_weights", {})
-        data = analysis.compute_category_stocks(
-            last_results.get("all_rows", []),
-            cat_type, cat_name,
-            manager_weights=weights if any(v > 0 for v in weights.values()) else None,
-            normalize_fn=normalize_fn,
+        mw = weights if any(v > 0 for v in weights.values()) else None
+        result = analysis.generate_written_analysis(
+            last_results.get("all_rows", []), manager_weights=mw
         )
-        return jsonify(data)
+        return jsonify(result)
     except ImportError:
         return jsonify({"error": "analysis module not found"}), 500
 
-@app.route("/api/acwi-benchmark")
-def api_acwi_benchmark():
-    try:
-        from financial_data import fetch_acwi_benchmark, normalize_sector_name, normalize_country_name
-        data = fetch_acwi_benchmark()
-        if data is None:
-            return jsonify({"error": "ACWI data unavailable"}), 503
-        # Normalize sector keys to GICS standard
-        if "sectors" in data:
-            norm = {}
-            for k, v in data["sectors"].items():
-                gics = normalize_sector_name(k)
-                norm[gics] = norm.get(gics, 0) + v
-            data["sectors"] = norm
-        # Normalize country keys to iShares standard
-        if "countries" in data:
-            norm_c = {}
-            for k, v in data["countries"].items():
-                nk = normalize_country_name(k)
-                norm_c[nk] = norm_c.get(nk, 0) + v
-            data["countries"] = norm_c
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/sector-treemap-data")
-def api_sector_treemap():
+@app.route("/api/portfolio-table")
+def api_portfolio_table():
+    if not last_results.get("all_rows"):
+        return jsonify({"error": "No data yet"}), 404
     try:
         import analysis
         cfg = load_config()
         weights = cfg.get("manager_weights", {})
-        data = analysis.compute_sector_treemap(
-            last_results.get("all_rows", []),
-            manager_weights=weights if any(v > 0 for v in weights.values()) else None
+        mw = weights if any(v > 0 for v in weights.values()) else None
+        top_n = request.args.get("top_n", 10, type=int)
+        result = analysis.compute_portfolio_table_data(
+            last_results.get("all_rows", []), manager_weights=mw, top_n=top_n
         )
-        return jsonify(data)
+        return jsonify(result)
     except ImportError:
         return jsonify({"error": "analysis module not found"}), 500
 
-@app.route("/api/geo-treemap-data")
-def api_geo_treemap():
+@app.route("/api/bubble-data")
+def api_bubble_data():
+    if not last_results.get("all_rows"):
+        return jsonify({"error": "No data yet"}), 404
     try:
         import analysis
         cfg = load_config()
         weights = cfg.get("manager_weights", {})
-        data = analysis.compute_geo_treemap(
-            last_results.get("all_rows", []),
-            manager_weights=weights if any(v > 0 for v in weights.values()) else None
+        mw = weights if any(v > 0 for v in weights.values()) else None
+        manager = request.args.get("manager", "")
+        all_rows = last_results.get("all_rows", [])
+        if manager:
+            all_rows = [r for r in all_rows if r["manager"] == manager]
+        result = analysis.compute_top_stocks_valuation(
+            all_rows, manager_weights=mw if not manager else None, top_n=30
         )
-        return jsonify(data)
+        # Add list of managers for toggle buttons
+        all_managers = sorted({r["manager"] for r in last_results.get("all_rows", [])})
+        result["managers"] = all_managers
+        return jsonify(result)
     except ImportError:
         return jsonify({"error": "analysis module not found"}), 500
 
@@ -1229,110 +1122,6 @@ def api_set_weights():
     save_config(cfg)
     return jsonify({"ok": True})
 
-@app.route("/api/weighted-return")
-def api_weighted_return():
-    try:
-        import analysis
-        wr = analysis.compute_portfolio_weighted_return(last_results.get("all_rows", []))
-        return jsonify(wr)
-    except ImportError:
-        return jsonify({"error": "analysis module not found"}), 500
-
-# ── QoQ Diff ──
-
-@app.route("/api/run-diff", methods=["POST"])
-def api_run_diff():
-    if not run_lock.acquire(blocking=False):
-        return jsonify({"error": "Already running"}), 409
-    data = request.json
-    date1 = data.get("date1", "")
-    date2 = data.get("date2", "")
-    if not date1 or not date2:
-        run_lock.release()
-        return jsonify({"error": "Two dates required"}), 400
-
-    cfg = load_config()
-    run_id = str(int(time.time()))
-    q = queue.Queue()
-    progress_queues[run_id] = q
-
-    def _go():
-        global diff_results
-        try:
-            import importlib
-            importlib.reload(holdings)
-            from edgar import set_identity
-            set_identity(cfg.get("identity", DEFAULT_CONFIG["identity"]))
-            holdings.TOP_N = cfg.get("top_n", 20)
-            holdings.OUTPUT_DIR = APP_DIR
-            def log(msg):
-                q.put({"type": "log", "message": msg})
-
-            managers_13f = cfg.get("managers_13f", {})
-            managers_nport = cfg.get("managers_nport", {})
-            total = (len(managers_13f) + len(managers_nport)) * 2
-            done = 0
-
-            log(f"QoQ Diff: fetching {len(managers_13f)} 13F + {len(managers_nport)} N-PORT managers for dates {date1} and {date2}")
-
-            rows1, rows2 = [], []
-
-            for name, cik in managers_13f.items():
-                log(f"[Period 1 · 13F] {name}...")
-                holdings.MAX_DATE = date1
-                try:
-                    _, _, _, r = holdings.fetch_13f(name, cik)
-                    rows1.extend(r)
-                except Exception as e:
-                    log(f"  Error: {e}")
-                done += 1
-                q.put({"type": "progress", "done": done, "total": total})
-
-                log(f"[Period 2 · 13F] {name}...")
-                holdings.MAX_DATE = date2
-                try:
-                    _, _, _, r = holdings.fetch_13f(name, cik)
-                    rows2.extend(r)
-                except Exception as e:
-                    log(f"  Error: {e}")
-                done += 1
-                q.put({"type": "progress", "done": done, "total": total})
-
-            for name, info in managers_nport.items():
-                log(f"[Period 1 · N-PORT] {name}...")
-                holdings.MAX_DATE = date1
-                try:
-                    _, _, _, r = holdings.fetch_nport(name, info["cik"], info["series_keyword"])
-                    rows1.extend(r)
-                except Exception as e:
-                    log(f"  Error: {e}")
-                done += 1
-                q.put({"type": "progress", "done": done, "total": total})
-
-                log(f"[Period 2 · N-PORT] {name}...")
-                holdings.MAX_DATE = date2
-                try:
-                    _, _, _, r = holdings.fetch_nport(name, info["cik"], info["series_keyword"])
-                    rows2.extend(r)
-                except Exception as e:
-                    log(f"  Error: {e}")
-                done += 1
-                q.put({"type": "progress", "done": done, "total": total})
-
-            import analysis
-            diff_results = analysis.compute_qoq_diff(rows2, rows1)
-            log("QoQ diff complete!")
-            q.put({"type": "complete", "results": {"diff": diff_results}})
-        finally:
-            run_lock.release()
-
-    threading.Thread(target=_go, daemon=True).start()
-    return jsonify({"run_id": run_id})
-
-@app.route("/api/diff-data")
-def api_diff_data():
-    return jsonify({"diff": diff_results})
-
 # ── History (SQLite) ──
 
 @app.route("/api/history")
@@ -1367,81 +1156,10 @@ def api_history_label(run_id):
     db.label_run(run_id, label)
     return jsonify({"ok": True})
 
-@app.route("/api/history/compare", methods=["POST"])
-def api_history_compare():
-    """Instant QoQ diff between two stored runs (no EDGAR fetch needed)."""
-    global diff_results
-    data = request.json
-    run_id_1 = data.get("run_id_1")  # earlier
-    run_id_2 = data.get("run_id_2")  # later
-    if not run_id_1 or not run_id_2:
-        return jsonify({"error": "Two run IDs required"}), 400
-    rows1 = db.load_run_rows(run_id_1)
-    rows2 = db.load_run_rows(run_id_2)
-    if not rows1 or not rows2:
-        return jsonify({"error": "One or both runs not found"}), 404
-    import analysis
-    diff_results = analysis.compute_qoq_diff(rows2, rows1)
-    return jsonify({"diff": diff_results})
-
-@app.route("/api/history/ticker/<ticker>")
-def api_ticker_history(ticker):
-    """Get a ticker's weight/value across stored runs."""
-    limit = request.args.get("limit", 20, type=int)
-    return jsonify({"history": db.ticker_history(ticker.upper(), limit)})
-
-@app.route("/api/stock-detail/<ticker>")
-def api_stock_detail(ticker):
-    """Full detail for a single stock: stats, managers, sparkline, weight history."""
-    ticker = ticker.upper()
-    all_rows = last_results.get("all_rows", [])
-    matches = [r for r in all_rows if (r.get("ticker") or "").upper() == ticker]
-    if not matches:
-        return jsonify({"error": "Ticker not found in current holdings"}), 404
-    ref = matches[0]
-    managers = sorted(
-        [{"manager": r["manager"], "pct": r.get("pct_of_portfolio", 0),
-          "value": r.get("value_usd", 0), "rank": r.get("rank")} for r in matches],
-        key=lambda m: m["pct"], reverse=True)
-    # 6-month sparkline + market cap via yfinance
-    sparkline, sparkline_dates, market_cap = [], [], None
-    try:
-        import yfinance as yf
-        t = yf.Ticker(ticker)
-        hist = t.history(period="6mo")
-        if hist is not None and not hist.empty:
-            sparkline = [round(float(p), 2) for p in hist["Close"].tolist()]
-            sparkline_dates = [d.strftime("%Y-%m-%d") for d in hist.index]
-        info = t.info or {}
-        market_cap = info.get("marketCap")
-    except Exception:
-        pass
-    history = db.ticker_history(ticker, limit=20)
-    return jsonify({
-        "ticker": ticker, "name": ref.get("name", ""),
-        "sector": ref.get("sector"), "industry": ref.get("industry"),
-        "country": ref.get("country"),
-        "forward_pe": ref.get("forward_pe"),
-        "trailing_eps": ref.get("trailing_eps"),
-        "forward_eps": ref.get("forward_eps"),
-        "filing_reported_eps": ref.get("filing_reported_eps"),
-        "filing_consensus_eps": ref.get("filing_consensus_eps"),
-        "filing_eps_beat_pct": ref.get("filing_eps_beat_pct"),
-        "forward_eps_growth": ref.get("forward_eps_growth"),
-        "dividend_yield": ref.get("dividend_yield"),
-        "filing_quarter_return_pct": ref.get("filing_quarter_return_pct"),
-        "prior_quarter_return_pct": ref.get("prior_quarter_return_pct"),
-        "qtd_return_pct": ref.get("qtd_return_pct"),
-        "filing_price_qtr_end": ref.get("filing_price_qtr_end"),
-        "market_cap": market_cap, "managers": managers,
-        "sparkline": sparkline, "sparkline_dates": sparkline_dates,
-        "history": history})
-
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    global last_results, diff_results
+    global last_results
     last_results = {}
-    diff_results = {}
     try:
         import financial_data
         financial_data.clear_cache()
@@ -1500,8 +1218,14 @@ def api_search_unified():
     with ThreadPoolExecutor(max_workers=2) as ex:
         fut_mf = ex.submit(_do_mf)
         fut_13f = ex.submit(_do_13f)
-        mf_results = fut_mf.result()
-        f13_results = fut_13f.result()
+        try:
+            mf_results = fut_mf.result(timeout=3)
+        except Exception:
+            mf_results = []
+        try:
+            f13_results = fut_13f.result(timeout=3)
+        except Exception:
+            f13_results = []
 
     results = []
     seen_keys = set()  # (cik, series_id) for NPORT, cik for 13F
@@ -1556,25 +1280,6 @@ def api_download():
     dt = last_results.get("run_date", datetime.today().strftime("%Y%m%d"))
     return send_file(buf, mimetype="application/zip", as_attachment=True,
                      download_name=f"manager_holdings_{dt}.zip")
-
-@app.route("/api/download-pdf")
-def api_download_pdf():
-    if not last_results.get("all_rows"):
-        return jsonify({"error": "No data yet"}), 404
-    try:
-        from holdings import generate_pdf
-        cfg = load_config()
-        buf = generate_pdf(
-            last_results.get("all_rows", []),
-            last_results.get("run_date", datetime.today().strftime("%Y%m%d")),
-            cfg
-        )
-        return send_file(buf, mimetype="application/pdf", as_attachment=True,
-                         download_name=f"portfolio_report_{last_results.get('run_date', '')}.pdf")
-    except ImportError:
-        return jsonify({"error": "reportlab not installed — pip install reportlab"}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/files/<path:filename>")
 def serve_file(filename):
